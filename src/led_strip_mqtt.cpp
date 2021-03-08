@@ -22,10 +22,8 @@
 
 //#define IR_SEND_PIN 33  //muss vor #include <IRremote.h> definiert werden damit default in private/IRremoteBoardDefs.h überschrieben wird
       // BUG: geht nicht -->  in platformio.ini definieren   build_flags =  -D IR_SEND_PIN=33
-#define IR_RECV_PIN 34
+#define IR_RECV_PIN  34     //34  15
 #include <IRremote.h>
-
-
 
 // -- Initial name of the Thing. Used e.g. as SSID of the own Access Point.
 const char thingName[] = HOSTNAME;
@@ -52,7 +50,7 @@ const char wifiInitialApPassword[] = WLAN_AP_PASS;
 IRsend irsend;
 IRrecv irrecv(IR_RECV_PIN);
 // http://www.righto.com/2009/08/multi-protocol-infrared-remote-library.html
-decode_results results;
+//decode_results results;
 
 // todo: auf std::map oder std::array umstellen  oder enum class
 // https://www.heise.de/developer/artikel/Mehr-besondere-Freunde-mit-std-map-und-std-unordered-map-4435976.html
@@ -70,10 +68,8 @@ String strMqttTopicsPub[] = {"stat/rgb", "stat/led" };
 enum  mqttTopicsPub {STATUS_RGB, STATUS_LED};
 
 // LED
-
-
 #include <NeoPixelBrightnessBus.h>
-
+#include <Kelvin2RGB.h>
 
 #include <Preferences.h>  // this library is used to get access to Non-volatile storage (NVS) of ESP32
 // see https://github.com/espressif/arduino-esp32/blob/master/libraries/Preferences/examples/StartCounter/StartCounter.ino
@@ -99,7 +95,7 @@ enum  mqttTopicsPub {STATUS_RGB, STATUS_LED};
 
 #endif
 
-#define  numPixels (sizeof(colors) / sizeof(colors[0]))
+const uint16_t  numPixels = (sizeof(colors) / sizeof(colors[0]));
 uint32_t pixelNum;
 uint16_t pr = 0, pg = 0, pb = 0; // Prev R, G, B
 uint8_t gradientDelay = 5;
@@ -111,6 +107,8 @@ bool Gradient=false;
 NeoPixelBrightnessBus<NeoGrbFeature, NeoWs2813Method> rgbstrip(RGB_PIXELS, RGB_PIN);
 // NeoGamma<NeoGammaTableMethod> colorGamma;
 NeoGamma<NeoGammaEquationMethod> colorGamma;
+
+Kelvin2RGB KRGB;
 
 Preferences preferences;  // we must generate this object of the preference library
 
@@ -145,8 +143,9 @@ void putPreferencesLED();
 void getPreferencesLED();
 void sendStatRgb();
 void TvSimulator();
-colorType kelvin2RGB(int kelvin);
+//colorType kelvin2RGB(int kelvin);
 void showGradient();
+void LedBeleuchtung(uint32_t irCode);
 
 DNSServer dnsServer;
 WebServer server(80);
@@ -156,7 +155,7 @@ myMqtt mqttClient(net);
 #ifdef ESP8266
 ESP8266HTTPUpdateServer httpUpdater;
 #elif defined(ESP32)
-HTTPUpdateServer httpUpdater;
+HTTPUpdateServer httpUpdater(false);   // true = mit Debugausgaben
 #endif
 
 char mqttServerValue[STRING_LEN];
@@ -201,6 +200,7 @@ uint32_t irLastTimer = 0;
 
 void irLoop() {
   static char irBuffer[64];
+  uint16_t geraet;
 #if 1 == 2  // IR-Test Hardware
   pinMode(IR_SEND_PIN, OUTPUT);
   if (millis() > irTestTimer) {
@@ -226,17 +226,33 @@ void irLoop() {
   }
 #endif
 
-  if (irrecv.decode(&results)) {
-    Serial << "IR-RECV --- Typ: " << results.decode_type << " = " << irrecv.getProtocolString() << "\t  Bits: " << results.bits << "\t  Code: 0x" << _HEX(results.value) << endl;
+  if (irrecv.decode()) {
+    geraet = irrecv.results.value >> 16;
+
+    Serial << "IR-RECV --- Typ: " <<  irrecv.results.decode_type << " = " << irrecv.getProtocolString() << "\t  Bits: " <<  irrecv.results.bits << "\t Gerät: 0x" << _HEX(geraet) << "\t  Code: 0x" << _HEX( irrecv.results.value) << " = " <<  irrecv.results.value << endl;
+
     irrecv.resume();  // Receive the next value
 
-    if ((results.decode_type > 0) & (!results.isRepeat)) {  // nur wenn Type bekannt und keine Wiederholung
-      if ((results.value != irLastValue) || (millis() > irLastTimer)) {  // nur wenn neuer Code oder Timer schon abgelaufen
+    if ( (( irrecv.results.decode_type == NEC) || ( irrecv.results.decode_type == SAMSUNG)) && (! irrecv.results.isRepeat) && (geraet !=  0xF7) ) {  // nur wenn Type bekannt und keine Wiederholung
+      if (( irrecv.results.value != irLastValue) || (millis() > irLastTimer)) {  // nur wenn neuer Code oder Timer schon abgelaufen
         irLastTimer = millis() + atoi(irTimervalue);
-        irLastValue = results.value;
-        snprintf(irBuffer, sizeof(irBuffer), "{\"typ\":%d,\"bits\":%d,\"code\":\"0x%X\"}", results.decode_type, results.bits, results.value);
+        irLastValue =  irrecv.results.value;
+        snprintf(irBuffer, sizeof(irBuffer), "{\"typ\":%d,\"bits\":%d,\"code\":\"0x%X\"}",  irrecv.results.decode_type,  irrecv.results.bits,  irrecv.results.value);
         mqttClient.publish(topicIR, irBuffer);
       }
+
+    }else{
+      LedBeleuchtung( irrecv.results.value);  // E:\Arduino\LedBeleuchtung\IR_Remote1-ESP\IR_Remote1-ESP.ino
+    }
+  }
+
+  if(Serial2.available())   // E:\Arduino\ATTINY\IRrecv2\IRrecv2.ino
+  {
+    uint32_t irCode = strtoul(Serial2.readString().c_str(),nullptr,16);
+    geraet =irCode >> 16;
+    if (geraet == 0xF7){
+       Serial << "S2: " << _HEX(irCode) << " = " << irCode << "\t G:" << geraet << endl;
+       LedBeleuchtung(irCode);
     }
   }
 }
@@ -247,6 +263,8 @@ void setup() {
   Serial.begin(BAUD);
   while (!Serial && (millis() < 3000));
   Serial << "\n\n" << ProjektName << " - " << VERSION << "  (" << BUILDDATE << "  " __TIME__ << ")" << endl;
+
+  Serial2.begin(115200);
 
   mqttGroup.addItem(&mqttServerParam);
   mqttGroup.addItem(&mqttUserNameParam);
@@ -306,6 +324,7 @@ void setup() {
 
   // Parameter für LED aus EEprom holen
   getPreferencesLED();
+  KRGB.begin();
   ledStatus = true;
   rgbstrip.Begin();
   if (led_H < 10) led_H = 80;
@@ -447,7 +466,7 @@ bool connectMqttOptions() {
   if (mqttUserPasswordValue[0] != '\0') {
     result = mqttClient.connect(mqttID.c_str(), mqttUserNameValue, mqttUserPasswordValue, mqttMainTopicValue, 0, true, mqttWillMessage);
   } else {
-    result = mqttClient.connect(mqttID.c_str());
+    result = mqttClient.connect(mqttID.c_str(), mqttMainTopicValue, 0, true, mqttWillMessage);
   }
   return result;
 }
@@ -524,9 +543,16 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
       ledStatus = true;
       int kelvin = sPayLoad.toInt();
       kelvin = (kelvin<650) ? 650:kelvin;
-      colorType color = kelvin2RGB(kelvin);
-      led_R=color.r; led_G=color.g; led_B=color.b;
-      setRGB(color.r , color.g, color.b, led_H, ledStatus);
+
+      // colorType color = kelvin2RGB(kelvin);
+      // led_R=color.r; led_G=color.g; led_B=color.b;
+      // DEBUG_PRINTF("R:%i, G%i, B%i\n",led_R,led_G,led_B);
+
+      KRGB.convert_NB(kelvin, led_H);
+      led_R=KRGB.red();led_G=KRGB.green(); led_B=KRGB.blue();
+      DEBUG_PRINTF("RGB:%x, R:%.0f, G%.0f, B%.0f\n",KRGB.RGB(),KRGB.red(),KRGB.green(),KRGB.blue());
+
+      //setRGB(led_R, led_G, led_B, led_H, ledStatus);
     } break;
     case POWER:
       TvSim    = false;
@@ -602,7 +628,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
       ledStatus = false;
       TvSim     = true;
       Gradient  = false;
-      randomSeed(analogRead(A0));
+       // randomSeed(analogRead(A0));  // Nicht notwendig weil ESP anhand Wifi und Bluetooth selbst setzt
       pixelNum = random(numPixels);  // Begin at random point
       DEBUG_PRINTF("TV_Sim Startpixel: %i\n", pixelNum);
       break;
@@ -774,8 +800,8 @@ void TvSimulator() {
 #endif
 }
 
-
-
+/*
+//TODO: umstellen auf https://github.com/RobTillaart/Kelvin2RGB
 colorType kelvin2RGB(int kelvin) {
 	double  temperature=0, red=0, green=0, blue=0;
 	colorType color = {0,0,0};
@@ -824,6 +850,7 @@ colorType kelvin2RGB(int kelvin) {
 	color.g = (uint8_t)(325.4494125711974 + 0.07943456536662342*green - 28.0852963507957*log(green));
 	return color;
 }
+*/
 
 void showGradient() {
 	static uint8_t hue;
@@ -831,31 +858,190 @@ void showGradient() {
 	// Use HSV to create nice gradient
 	//Serial << "HUE:" << hue << ": ";
 	for ( int i = 0; i != RGB_PIXELS; i++ ){
-
-		#ifdef NEOPIXEL
 			float  lhue = (hue +  gradientHueDelta * i)/360.0f;
 			//Serial << _FLOAT(lhue,3) << "|";
 			rgbstrip.SetPixelColor(i,HsbColor( lhue , 1.0f, 0.2f));   // = HSV
-		#endif
-		#ifdef FASTLED
-			uint8_t  lhue = map(hue+ (gradientHueDelta * i),0,255+(gradientHueDelta * RGB_PIXELS),0,255);
-			Serial << "->" << hue+(gradientHueDelta * i) << "->" << lhue << "|";
-			leds[i] = CHSV(lhue,255,255);
-		#endif
 	}
    //Serial << endl;
   iotWebConf.delay(gradientDelay);   //TODO: Auf Version ohne Delay umbauen
   yield();
 	portDISABLE_INTERRUPTS();
-	#ifdef NEOPIXEL
-		rgbstrip.Show();
-	#endif
-	#ifdef FASTLED
-		yield();
-		FastLED.show();
-		yield();
-	#endif
+	rgbstrip.Show();
 	portENABLE_INTERRUPTS();
 
 	//Serial << "time:" << millis() <<endl;
  }
+
+#if 1==1
+#define IR_CODE_LED_ON      0x00F7C03F
+#define IR_CODE_LED_OFF     0x00F740BF
+
+#define IR_CODE_LED_UP      0x00F700FF
+#define IR_CODE_LED_DOWN    0x00F7807F
+
+ void LedBeleuchtung(uint32_t irCode) {
+  TvSim = false;
+	ledStatus = true;
+	switch (irCode) {
+    case IR_CODE_LED_ON:
+      Serial << "IR LED_ON" << endl;
+      ledStatus = true;
+      TvSim = false;
+      Gradient = false;
+      if (led_H < 10) led_H = 50;
+       break;
+    case IR_CODE_LED_OFF:
+     Serial << "IR LED_OFF" << endl;
+      ledStatus = false;
+      TvSim = false;
+      Gradient = false;
+      break;
+
+		case IR_CODE_LED_UP:
+			if ((led_H <= 95) & (led_H > 49)) {
+				led_H += 5;
+			}
+			if (led_H <= 50) {
+				led_H += 1;
+			}
+			ledStatus = true;
+			break;
+		case IR_CODE_LED_DOWN:
+			if (led_H > 49) {
+				led_H -= 5;
+			}
+			else {
+				if (led_H > 0) {
+					led_H -= 1;
+				}
+			}
+			ledStatus = true;
+			break;
+
+
+		case 0x00F720DF:   //Rot 100%
+			led_R = 255;
+			led_G = 0;
+			led_B = 0;
+			break;
+		case 0x00F7A05F:    //Grün 100%
+			led_R = 0;
+			led_G = 255;
+			led_B = 0;
+			break;
+		case 0x00F7609F:   //Blau 100%
+			led_R = 0;
+			led_G = 0;
+			led_B = 255;
+			break;
+		case 0x00F7E01F:   //Weiss 100%
+			led_R = 255;
+			led_G = 255;
+			led_B = 255;
+		  led_H = 100;
+			break;
+
+		case 0x00F710EF:    //Rot 80%
+			led_R = 255;
+			led_G = 50;
+			led_B = 0;
+			break;
+		case 0x00F7906F:   //Grün 80%
+			led_R = 0;
+			led_G = 255;
+			led_B = 100;
+			break;
+		case  0x00F750AF:   //Blau 80%
+			led_R = 50;
+			led_G = 0;
+			led_B = 255;
+			break;
+
+		case 0x00F730CF:   //Rot 60%
+			led_R = 255;
+			led_G = 100;
+			led_B = 0;
+			break;
+		case 0x00F7B04F:   //Grün 60%
+			led_R = 0;
+			led_G = 255;
+			led_B = 200;
+			break;
+		case 0x00F7708F:   //Blau 60%
+			led_R = 100;
+			led_G = 0;
+			led_B = 255;
+			break;
+
+		case  0x00F708F7:    //Rot 40%
+			led_R = 255;
+			led_G = 150;
+			led_B = 0;
+			break;
+		case 0x00F78877:   //Grün 40%
+			led_R = 0;
+			led_G = 200;
+			led_B = 250;
+			break;
+		case 0x00F748B7:     //Blau 40%
+			led_R = 150;
+			led_G = 0;
+			led_B = 255;
+			break;
+
+		case 0x00F728D7:      //Rot 20%
+			led_R = 255;
+			led_G = 200;
+			led_B = 0;
+			break;
+		case 0x00F7A857:    //Grün 20%
+			led_R = 0;
+			led_G = 155;
+			led_B = 255;
+			break;
+		case 0x00F76897:   //Blau 20%
+			led_R = 200;
+			led_G = 0;
+			led_B = 255;
+			break;
+
+
+		case 0x00F7D02F:   //Save        FLASH
+			putPreferencesLED();
+			break;
+
+		case 0x00F7F00F:   //Recall      STROBE
+			getPreferencesLED();
+			break;
+
+		case  0x00F7C837:  // TV Simulator einschalten      FADE
+			TvSim = true;
+			ledStatus = false;
+      pixelNum = random(numPixels);  // Begin at random point
+      DEBUG_PRINTF("TV_Sim Startpixel: %i\n", pixelNum);
+			break;
+
+    case 0x00F7E817:   //Reset       SMOOTH
+      led_R     = 0xcc; //0xfa;
+      led_G     = 0x7e; //0xa2;
+      led_B     = 0x32; //0x05;
+      led_H     = 100;
+      TvSim = false;
+			ledStatus = true;
+      break;
+
+		default:
+			break;
+	}
+
+	//setLedStripColor(led_R, led_G, led_B, led_H, ledStatus);
+
+DEBUG(
+	//Serial << _FLOAT(millis() / 100, 1) << " IR:" << results.value << " 0x" << _HEX(results.value) << endl;
+	Serial << "RGB#H:" << led_R << "/" << led_G << "/" << led_B << "#" << led_H << " St:" << ledStatus << endl;
+);
+  setRGB(led_R, led_G, led_B, led_H, ledStatus);
+  sendStatRgb();
+}
+
+#endif
