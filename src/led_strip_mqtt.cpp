@@ -9,6 +9,9 @@
 #define DEBUG_EIN  //"Schalter" zum aktivieren von DEBUG-Ausgaben
 #include <myDebug.h>
 
+#include "soc/rtc_wdt.h"
+//#define CONFIG_ESP_INT_WDT_TIMEOUT_MS  500
+
 
 #include <IotWebConf.h>       // https://github.com/prampec/IotWebConf
 
@@ -69,14 +72,13 @@ enum  mqttTopicsPub {STATUS_RGB, STATUS_LED};
 
 // LED
 #include <NeoPixelBrightnessBus.h>
+//#include <NeoPixelBus.h>
 #include <Kelvin2RGB.h>
 
 #include <Preferences.h>  // this library is used to get access to Non-volatile storage (NVS) of ESP32
 // see https://github.com/espressif/arduino-esp32/blob/master/libraries/Preferences/examples/StartCounter/StartCounter.ino
 
-#ifdef mitTVSIM
-#include <tv_sim_data.h>
-#endif
+
 
 #if 0  // zum Testen
 #define RGB_PIN 13
@@ -95,7 +97,11 @@ enum  mqttTopicsPub {STATUS_RGB, STATUS_LED};
 
 #endif
 
+#ifdef mitTVSIM
+#include <tv_sim_data.h>
+
 const uint16_t  numPixels = (sizeof(colors) / sizeof(colors[0]));
+#endif
 uint32_t pixelNum;
 uint16_t pr = 0, pg = 0, pb = 0; // Prev R, G, B
 uint8_t gradientDelay = 5;
@@ -105,6 +111,9 @@ bool Gradient=false;
 
 // NeoPixelBus< NeoGrbFeature, Neo800KbpsMethod> rgbstrip(RGB_PIXELS, RGB_PIN);
 NeoPixelBrightnessBus<NeoGrbFeature, NeoWs2813Method> rgbstrip(RGB_PIXELS, RGB_PIN);
+//NeoPixelBus<NeoGrbFeature, NeoWs2813Method> rgbstrip(RGB_PIXELS, RGB_PIN);
+//NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1Ws2813Method> rgbstrip(RGB_PIXELS, RGB_PIN);  //TODO:Version für ESP32 prüfen ob möglich
+
 // NeoGamma<NeoGammaTableMethod> colorGamma;
 NeoGamma<NeoGammaEquationMethod> colorGamma;
 
@@ -264,7 +273,7 @@ void setup() {
   while (!Serial && (millis() < 3000));
   Serial << "\n\n" << ProjektName << " - " << VERSION << "  (" << BUILDDATE << "  " __TIME__ << ")" << endl;
 
-  Serial2.begin(115200);
+  Serial2.begin(115200);  // IR_REC über ATTINY
 
   mqttGroup.addItem(&mqttServerParam);
   mqttGroup.addItem(&mqttUserNameParam);
@@ -625,12 +634,14 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
       }
       break;
     case TVSIM:
+    #ifdef mitTVSIM
       ledStatus = false;
       TvSim     = true;
       Gradient  = false;
        // randomSeed(analogRead(A0));  // Nicht notwendig weil ESP anhand Wifi und Bluetooth selbst setzt
       pixelNum = random(numPixels);  // Begin at random point
       DEBUG_PRINTF("TV_Sim Startpixel: %i\n", pixelNum);
+      #endif
       break;
 
     default:
@@ -731,11 +742,13 @@ void getPreferencesLED() {                 // Parameter aus EEprom holen, falls 
   preferences.end();
 }
 
+uint32_t tvSimNextHoldTime;
 void TvSimulator() {
 #ifdef mitTVSIM
   uint32_t totalTime, fadeTime, holdTime, startTime, elapsed;
   uint16_t nr, ng, nb, r, g, b, i;
   uint8_t hi, lo, r8, g8, b8, frac;
+if( millis() > tvSimNextHoldTime){
 
   // Read next 16-bit (5/6/5) color
   hi = pgm_read_byte(&colors[pixelNum * 2]);
@@ -755,6 +768,7 @@ void TvSimulator() {
   fadeTime  = random(0, totalTime);  // Pixel-to-pixel transition time
   if (random(10) < 3) fadeTime = 0;  // Force scene cut 30% of time
   holdTime = totalTime - fadeTime;   // Non-transition time
+  tvSimNextHoldTime = millis() + holdTime;
 #if 1 == 2
   Serial << _FLOAT(millis() / 100, 1) << "\t pixelnum: " << pixelNum << "\t totalTime:" << totalTime << "\t fadeTime:" << fadeTime << "\t holdTime:" << holdTime;
   Serial << "\t Color  R:" << _HEX(nr) << "\t G:" << _HEX(ng) << "\tB:" << _HEX(nb) << endl;
@@ -787,90 +801,47 @@ void TvSimulator() {
     rgbstrip.Show();
 
     if (elapsed >= fadeTime) break;
-    iotWebConf.delay(1);  // TODO:  Notwendig????
-    yield();              // TODO:  Notwendig????
+    iotWebConf.delay(1);
+    yield();
   }
-  // delay(holdTime);
-  iotWebConf.delay(holdTime);
-
+  //iotWebConf.delay(holdTime); //TODO: auf Version ohne Dealy umbauen, erledigt
 
   pr = nr;  // Prev RGB = new RGB
   pg = ng;
   pb = nb;
+}
 #endif
 }
 
-/*
-//TODO: umstellen auf https://github.com/RobTillaart/Kelvin2RGB
-colorType kelvin2RGB(int kelvin) {
-	double  temperature=0, red=0, green=0, blue=0;
-	colorType color = {0,0,0};
-	//color.r = 0; color.g = 0; color.b = 0;
+//TODO: umstellen auf https://github.com/RobTillaart/Kelvin2RGB,  erledigt
 
-	if (kelvin == 6500 ) {
-		// Hard fit at 6500K.
-		return {255,255,255};
-	}
-	temperature = double(kelvin) * 0.01;
-	if ( kelvin < 6500 ){
-		color.r = 255;
-			// a + b x + c Log[x] /.
-			// {a -> -155.25485562709179`,
-			// b -> -0.44596950469579133`,
-			// c -> 104.49216199393888`,
-			// x -> (kelvin/100) - 2}
-			green = temperature - 2;
-			color.g = (uint8_t) (-155.25485562709179 - 0.44596950469579133*green + 104.49216199393888*log(green));
 
-		if (kelvin > 1950) {
-			// a + b x + c Log[x] /.
-			// {a -> -254.76935184120902`,
-			// b -> 0.8274096064007395`,
-			// c -> 115.67994401066147`,
-			// x -> kelvin/100 - 10}
-			blue = temperature - 10;
-			color.b = (uint8_t)(-254.76935184120902 + 0.8274096064007395*blue + 115.67994401066147*log(blue));
-		}
-		return color;
-	}
-	color.b = 255;
-	// a + b x + c Log[x] /.
-	// {a -> 351.97690566805693`,
-	// b -> 0.114206453784165`,
-	// c -> -40.25366309332127
-	//x -> (kelvin/100) - 55}
-	red = temperature - 55;
-	color.r = (uint8_t)(351.97690566805693 + 0.114206453784165*red - 40.25366309332127*log(red));
-	// a + b x + c Log[x] /.
-	// {a -> 325.4494125711974`,
-	// b -> 0.07943456536662342`,
-	// c -> -28.0852963507957`,
-	// x -> (kelvin/100) - 50}
-	green = temperature - 50;
-	color.g = (uint8_t)(325.4494125711974 + 0.07943456536662342*green - 28.0852963507957*log(green));
-	return color;
-}
-*/
-
+uint32_t nextGradientTimer;
 void showGradient() {
-	static uint8_t hue;
-	hue++;
-	// Use HSV to create nice gradient
-	//Serial << "HUE:" << hue << ": ";
-	for ( int i = 0; i != RGB_PIXELS; i++ ){
-			float  lhue = (hue +  gradientHueDelta * i)/360.0f;
-			//Serial << _FLOAT(lhue,3) << "|";
-			rgbstrip.SetPixelColor(i,HsbColor( lhue , 1.0f, 0.2f));   // = HSV
-	}
-   //Serial << endl;
-  iotWebConf.delay(gradientDelay);   //TODO: Auf Version ohne Delay umbauen
-  yield();
-	portDISABLE_INTERRUPTS();
-	rgbstrip.Show();
-	portENABLE_INTERRUPTS();
+  static uint8_t hue;
+  if (millis() > nextGradientTimer) {
+    if (gradientDelay < 5 ) gradientDelay =5;
+    nextGradientTimer = millis() + gradientDelay;
+    hue++;
+    // Use HSV to create nice gradient
+    // Serial << "HUE:" << hue << ": ";
+    for (int i = 0; i != RGB_PIXELS; i++) {
+      float lhue = (hue + gradientHueDelta * i) / 360.0f;
+      // Serial << _FLOAT(lhue,3) << "|";
+      rgbstrip.SetPixelColor(i, HsbColor(lhue, 1.0f, 0.2f));  // = HSV
+    }
+    // Serial << endl;
+    //iotWebConf.delay(gradientDelay);  // TODO: Auf Version ohne Delay umbauen, erledigt
+    yield();
+    rtc_wdt_feed();
 
-	//Serial << "time:" << millis() <<endl;
- }
+    portDISABLE_INTERRUPTS();
+    rgbstrip.Show();
+    portENABLE_INTERRUPTS();
+
+    // Serial << "time:" << millis() <<endl;
+  }
+}
 
 #if 1==1
 #define IR_CODE_LED_ON      0x00F7C03F
@@ -881,20 +852,17 @@ void showGradient() {
 
  void LedBeleuchtung(uint32_t irCode) {
   TvSim = false;
+  Gradient=false;
 	ledStatus = true;
 	switch (irCode) {
     case IR_CODE_LED_ON:
       Serial << "IR LED_ON" << endl;
       ledStatus = true;
-      TvSim = false;
-      Gradient = false;
       if (led_H < 10) led_H = 50;
        break;
     case IR_CODE_LED_OFF:
      Serial << "IR LED_OFF" << endl;
       ledStatus = false;
-      TvSim = false;
-      Gradient = false;
       break;
 
 		case IR_CODE_LED_UP:
@@ -904,7 +872,6 @@ void showGradient() {
 			if (led_H <= 50) {
 				led_H += 1;
 			}
-			ledStatus = true;
 			break;
 		case IR_CODE_LED_DOWN:
 			if (led_H > 49) {
@@ -915,7 +882,6 @@ void showGradient() {
 					led_H -= 1;
 				}
 			}
-			ledStatus = true;
 			break;
 
 
@@ -1006,8 +972,13 @@ void showGradient() {
 			break;
 
 
-		case 0x00F7D02F:   //Save        FLASH
-			putPreferencesLED();
+		case 0x00F7D02F:        // FLASH
+			//putPreferencesLED();  //Save
+      Gradient  = true;       // Regenbogen
+      ledStatus = true;
+      TvSim     = false;
+
+      nextGradientTimer=0;
 			break;
 
 		case 0x00F7F00F:   //Recall      STROBE
@@ -1015,10 +986,13 @@ void showGradient() {
 			break;
 
 		case  0x00F7C837:  // TV Simulator einschalten      FADE
+      #ifdef mitTVSIM
 			TvSim = true;
 			ledStatus = false;
+      Gradient  = false;
       pixelNum = random(numPixels);  // Begin at random point
       DEBUG_PRINTF("TV_Sim Startpixel: %i\n", pixelNum);
+      #endif
 			break;
 
     case 0x00F7E817:   //Reset       SMOOTH
@@ -1027,6 +1001,7 @@ void showGradient() {
       led_B     = 0x32; //0x05;
       led_H     = 100;
       TvSim = false;
+      Gradient = false;
 			ledStatus = true;
       break;
 
